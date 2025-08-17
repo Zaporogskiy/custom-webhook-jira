@@ -1,32 +1,29 @@
-# .github/workflows/jira-webhook.yml
-name: Jira webhook (draft release + manual)
+name: Notify Jira on Release Events
 
 on:
-  # Срабатывает при создании релиза (в т.ч. draft)
   release:
-    types: [created]
-  # Ручной запуск с произвольным JSON
+    types: [created, edited, published, unpublished, deleted]
   workflow_dispatch:
     inputs:
       custom_payload:
-        description: 'Custom JSON payload for Jira (optional)'
+        description: 'Custom JSON payload (optional)'
         required: false
         default: '{}'
 
 jobs:
   notify-jira:
     runs-on: ubuntu-latest
+
+    # Пробрасываем секреты в env
     env:
       JIRA_WEBHOOK_URL: ${{ secrets.JIRA_WEBHOOK_URL }}
       JIRA_WEBHOOK_TOKEN: ${{ secrets.JIRA_WEBHOOK_TOKEN }}
 
-    # Запускаем джоб:
-    # - всегда при ручном запуске
-    # - или если создан release и он именно draft
+    # Ручной запуск — всегда; release-события — только для draft
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'release' &&
-       github.event.action == 'created' &&
+       github.event.release &&
        github.event.release.draft == true)
 
     steps:
@@ -35,31 +32,31 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "🔧 Manual trigger"
+            echo "🔧 Manual trigger with custom payload"
+            # Берём JSON из ввода ручного запуска
             printf '%s' '${{ inputs.custom_payload }}' > payload.json
           else
-            echo "📝 Draft release created: ${{ github.event.release.tag_name }}"
-            # Кладём ВЕСЬ event в файл безопасно
-            cat > payload.json <<'JSON'
-            ${{ toJson(github.event) }}
-            JSON
+            echo "🚀 Release event trigger: ${{ github.event.release.tag_name }}"
+            # Сериализуем ВСЁ событие release в файл безопасно
+            printf '%s' '${{ toJson(github.event) }}' > payload.json
           fi
+
           echo "payload_path=payload.json" >> "$GITHUB_OUTPUT"
           echo "Payload bytes:"; wc -c payload.json
 
-      - name: POST to Jira Automation webhook
+      - name: Send webhook to Jira
         run: |
           set -euo pipefail
           HTTP_CODE=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
             -X POST \
             -H "Content-Type: application/json" \
             -H "X-Automation-Webhook-Token: ${JIRA_WEBHOOK_TOKEN}" \
-            --data-binary @"${{ steps.payload.outputs.payload_path }}" \
+            --data-binary @${{ steps.payload.outputs.payload_path }} \
             "${JIRA_WEBHOOK_URL}")
 
           echo "HTTP: $HTTP_CODE"
           cat /tmp/resp.txt || true
 
-          # Фейлим джоб, если не 2xx — удобно для тестов
+          # Фейлим, если не 2xx — удобнее отлаживать
           test "${HTTP_CODE:0:1}" = "2"
-          echo "✅ Sent to Jira"
+          echo "✅ Webhook sent successfully"
